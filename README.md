@@ -1,5 +1,11 @@
 # Clasificador de Papers de IA en Oncología de Precisión
 
+## Integrantes
+
+* Aranza Sue Diaz
+* Ignacio baeza
+* Javier Nanco
+
 Este proyecto es un **script en Python** para filtrar papers científicos desde un Excel, usando **Google Gemini**. Evalúa tanto **títulos** como **abstracts** y clasifica los papers como **relevantes** o no según criterios de IA aplicada a la Oncología de Precisión.
 
 ## Características
