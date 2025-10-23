@@ -28,7 +28,7 @@ Este proyecto es un **script en Python** para filtrar papers científicos desde 
 ## Uso
 
 ```bash
-python clasificador_papers.py
+python FiltroLLM.py
 ```
 
 El script procesará la hoja seleccionada, clasificará cada paper y guardará los resultados en el Excel de salida.
