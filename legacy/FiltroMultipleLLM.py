@@ -1,40 +1,26 @@
 # -*- coding: utf-8 -*-
-
 import pandas as pd
 import google.generativeai as genai
 import os
 from tqdm import tqdm
 import time
 from dotenv import load_dotenv
+from multiprocessing import Pool, cpu_count
+import numpy as np
 
 # Carga las variables de entorno del archivo .env
 load_dotenv()
 
-# --- CONFIGURACIÓN INICIAL ---
-try:
-    genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-except KeyError:
-    print("Error: No se encontró la GOOGLE_API_KEY.")
-    print("Asegúrate de que tu archivo .env está en la misma carpeta y tiene el formato correcto.")
-    exit()
-
-# Configura el modelo de Gemini
-model = genai.GenerativeModel('models/gemini-2.5-flash')
-
-# --- CONFIGURACIONES DE ARCHIVO ---
-ARCHIVO_ENTRADA = 'bibliografia Unida.xlsx'
+# --- CONFIGURACIÓN DE ARCHIVO ---
+ARCHIVO_ENTRADA = 'Bibliografia Unida.xlsx'
 ARCHIVO_SALIDA = 'bibliografia_filtrada_final.xlsx'
+HOJA_OBJETIVO = 'Precision Oncology'
+COLUMNA_TITULO = 'Title'
+COLUMNA_ABSTRACT = 'Abstract'
 
-# 🔹 Nombre de la hoja a procesar (solo una)
-HOJA_OBJETIVO = 'AI in Oncology'   # 👈 cámbiala según necesites
-
-# 🔹 Columnas relevantes
-COLUMNA_TITULO = 'Article Title'
-COLUMNA_ABSTRACT = 'Abstract'       # 👈 nueva columna incluida
-
-# --- ⚙️ CONFIGURACIÓN DE PRUEBA GLOBAL ---
-MODO_PRUEBA = True
+MODO_PRUEBA = False
 N_FILAS_PRUEBA = 9
+
 
 # --- EL CEREBRO DEL FILTRO: EL PROMPT ---
 def crear_prompt(titulo_del_paper, abstract_del_paper, nombre_de_la_hoja):
@@ -63,60 +49,83 @@ def crear_prompt(titulo_del_paper, abstract_del_paper, nombre_de_la_hoja):
         **Título:** "{titulo_del_paper}"
         **Abstract:** "{abstract_del_paper if isinstance(abstract_del_paper, str) else ''}"
     """
-
-# --- FUNCIÓN PARA CLASIFICAR CON GEMINI ---
-def es_relevante(titulo, abstract, nombre_de_la_hoja):
+def es_relevante(model, titulo, abstract, nombre_de_la_hoja):
     if not isinstance(titulo, str) or not titulo.strip():
         return False
-
     prompt = crear_prompt(titulo, abstract, nombre_de_la_hoja)
     try:
         respuesta = model.generate_content(prompt)
         texto_limpio = respuesta.text.strip().upper()
         return texto_limpio == 'SÍ'
     except Exception as e:
-        print(f"\nError al procesar el título '{titulo}': {e}")
+        print(f"Error con '{titulo[:40]}...': {e}")
         time.sleep(5)
         return False
 
-# --- EJECUCIÓN PRINCIPAL ---
-if __name__ == "__main__":
-    print(f"Cargando hoja '{HOJA_OBJETIVO}' del archivo: {ARCHIVO_ENTRADA}")
-    try:
-        df = pd.read_excel(ARCHIVO_ENTRADA, sheet_name=HOJA_OBJETIVO)
-    except FileNotFoundError:
-        print(f"Error: No se encontró el archivo '{ARCHIVO_ENTRADA}'.")
-        exit()
-    except ValueError:
-        print(f"Error: No se encontró la hoja '{HOJA_OBJETIVO}' en el archivo.")
-        exit()
+# --- FUNCIÓN DE PROCESAMIENTO PARALELO ---
+def procesar_parte(args):
+    parte_df, api_key, hoja, idx = args
 
-    print(f"--- Procesando hoja: '{HOJA_OBJETIVO}' ({len(df)} registros) ---")
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('models/gemini-2.5-flash')
 
-    # Verifica columnas
-    for col in [COLUMNA_TITULO, COLUMNA_ABSTRACT]:
-        if col not in df.columns:
-            print(f"Advertencia: La columna '{col}' no se encuentra en la hoja '{HOJA_OBJETIVO}'. Se omitirá.")
-    
-    # ⚙️ Modo de prueba
-    if MODO_PRUEBA:
-        df = df.head(N_FILAS_PRUEBA)
-        print(f"⚠️ MODO PRUEBA ACTIVADO: Solo se procesarán las primeras {N_FILAS_PRUEBA} filas.")
-
-    tqdm.pandas(desc=f"Filtrando '{HOJA_OBJETIVO}'")
-    df['relevante'] = df.progress_apply(
+    tqdm.pandas(desc=f"Parte {idx+1}")
+    parte_df['relevante'] = parte_df.progress_apply(
         lambda fila: es_relevante(
+            model,
             fila.get(COLUMNA_TITULO, ''),
             fila.get(COLUMNA_ABSTRACT, ''),
-            HOJA_OBJETIVO
+            hoja
         ),
         axis=1
     )
 
-    df_filtrado = df[df['relevante'] == True].copy()
+    df_filtrado = parte_df[parte_df['relevante'] == True].copy()
+    temp_file = f"temp_result_{idx}.xlsx"
     df_filtrado.drop(columns=['relevante'], inplace=True)
+    df_filtrado.to_excel(temp_file, index=False)
+    return temp_file
 
-    print(f"Se encontraron {len(df_filtrado)} papers relevantes en '{HOJA_OBJETIVO}'.")
+# --- EJECUCIÓN PRINCIPAL ---
+if __name__ == "__main__":
+    # Cargar todas las API keys numeradas
+    api_keys = [v for k, v in os.environ.items() if k.startswith("GOOGLE_API_KEY")]
+    api_keys = sorted(api_keys)  # ordenadas
+    if not api_keys:
+        print("❌ No se encontraron API keys en el .env")
+        exit()
 
-    df_filtrado.to_excel(ARCHIVO_SALIDA, sheet_name=HOJA_OBJETIVO, index=False)
-    print(f"\n¡Proceso completado! Los resultados han sido guardados en '{ARCHIVO_SALIDA}'. uwu")
+    print(f"🔑 Se encontraron {len(api_keys)} API keys disponibles.")
+    print(f"Cargando hoja '{HOJA_OBJETIVO}' del archivo '{ARCHIVO_ENTRADA}'...")
+
+    try:
+        df = pd.read_excel(ARCHIVO_ENTRADA, sheet_name=HOJA_OBJETIVO)
+    except Exception as e:
+        print(f"Error al leer el Excel: {e}")
+        exit()
+
+    if MODO_PRUEBA:
+        df = df.head(N_FILAS_PRUEBA)
+        print(f"⚠️ MODO PRUEBA ACTIVADO ({N_FILAS_PRUEBA} filas).")
+
+    n_partes = min(len(api_keys), len(df))
+    partes = np.array_split(df, n_partes)
+
+    print(f"Dividiendo en {n_partes} partes según las API keys disponibles...")
+
+    args = [(partes[i], api_keys[i % len(api_keys)], HOJA_OBJETIVO, i) for i in range(n_partes)]
+
+    with Pool(processes=min(len(api_keys), cpu_count())) as pool:
+        archivos_temp = pool.map(procesar_parte, args)
+
+    # Unir resultados
+    print("🧩 Uniendo resultados...")
+    dfs_finales = [pd.read_excel(f) for f in archivos_temp]
+    df_final = pd.concat(dfs_finales, ignore_index=True)
+    df_final.to_excel(ARCHIVO_SALIDA, sheet_name=HOJA_OBJETIVO, index=False)
+
+    # Limpiar archivos temporales
+    for f in archivos_temp:
+        os.remove(f)
+
+    print(f"✅ ¡Proceso completado! Resultados guardados en '{ARCHIVO_SALIDA}'.")
